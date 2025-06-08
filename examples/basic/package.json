@@ -13,7 +13,7 @@
 	"dependencies": {
 		"civetman": "workspace:*",
 		"type-fest": "^3.5.7",
-		"typescript": "^4.9.5"
+		"typescript": "^5.8.3"
 	},
 	"devDependencies": {
 		"@types/node": "^18.13.0",
