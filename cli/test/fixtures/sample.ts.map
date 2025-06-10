@@ -1,0 +1,1 @@
+{"version":3,"file":"sample.ts","sources":["sample.civet"],"mappings":"AAAA,+BAA+B;AAC/B,AAAA,MAAM,CAAC,QAAQ,CAAC,GAAG,CAAC,CAAC,CAAA,CAAA;AACrB,AAAA,EAAE,MAAM,CAAC,E;AAAE,CAAA","names":[],"sourcesContent":["// sample.civet for plugin test\nexport function foo()\n  return 42 "]}

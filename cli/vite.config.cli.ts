@@ -1,12 +1,14 @@
-import { defineConfig } from "vite"
+import { defineConfig, type PluginOption } from "vite"
 import Civet from "vite-plugin-civet"
 
 export default defineConfig({
 	build: {
 		lib: {
-			entry: "./index.ts",
+			entry: {
+				'index': './index.ts',
+			},
 			formats: ["es"],
-			fileName: "index",
+			fileName: () => 'index'
 		},
 		minify: false,
 		rollupOptions: {
@@ -22,5 +24,5 @@ export default defineConfig({
 			],
 		},
 	},
-	plugins: [Civet()],
-})
+	plugins: [Civet() as PluginOption],
+}) 

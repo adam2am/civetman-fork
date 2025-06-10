@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "target": "es2018",
+    "allowJs": true,
+    "moduleResolution": "node",
+    "noEmit": true
+  },
+  "include": ["**/*.ts", "**/*.civet"]
+} 
