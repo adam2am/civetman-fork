@@ -1,1 +1,7 @@
-export add := (a: number, b: number) => a + b
+export class Calculator {
+    add(a: number, b: number) {
+        return a + b
+    }
+}
+
+export const calculator = new Calculator()

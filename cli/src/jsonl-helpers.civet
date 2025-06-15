@@ -1,0 +1,45 @@
+// --------------------------------------------------------------------
+// jsonl-helpers.civet – Helpers for reading/writing JSON-Lines files
+// --------------------------------------------------------------------
+fs from "fs-extra"
+{ safeWrite } from "./main.civet"
+
+// A record in our hashes.jsonl file
+export type HashEntry = 
+    file: string,
+    sig: string,
+    outFile: string
+
+
+// Reads a .jsonl file and reconstructs the latest state for each key.
+// The last entry for any given file path wins.
+export loadHashesFromJSONL := 
+    async (filePath: string): Promise<Record<string, { sig: string, outFile: string }>> => 
+        try
+            unless await fs.pathExists(filePath) return {}
+            content := await fs.readFile(filePath, "utf8")
+            lines := content.split('\n')
+            
+            map: Record<string, { sig: string, outFile: string }> := {}
+
+            for line of lines
+                if !line.trim() continue
+                try
+                    entry := JSON.parse(line) as HashEntry
+                    map[entry.file] = { sig: entry.sig, outFile: entry.outFile }
+                catch _
+                    // ignore corrupted lines, let the last valid one win
+                    continue
+            return map
+        catch _
+            // On any error, return empty map to force a full rebuild.
+            return {}
+
+// Overwrites the hashes file with the latest, complete state.
+export writeHashesToJSONL :=
+    async (filePath: string, hashes: Record<string, { sig: string, outFile: string }>) =>
+        lines := Object.entries(hashes).map (([file, data]) => 
+            JSON.stringify({ file, ...data })
+        )
+        content := lines.join('\n') + '\n'
+        await safeWrite(filePath, content) 

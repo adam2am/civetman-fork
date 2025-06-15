@@ -1,0 +1,10 @@
+export {}
+
+age := 123
+
+unless age > 18 
+    console.log "You're a minor"
+else
+    console.log "You're an adult"
+
+

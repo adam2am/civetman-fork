@@ -5,5 +5,7 @@
 	"scripts": {
 		"postinstall": "cd cli && pnpm build",
 		"dev": "cd cli && pnpm dev"
+	},
+	"dependencies": {
 	}
 }
