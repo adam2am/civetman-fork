@@ -44,20 +44,22 @@ type Options =
     outTs?: string[],      // folders
     outTsx?: string[],
     ignoreFolders?: string[], // folders to completely ignore
+    onlyFolders?: string[], // folders to exclusively build/watch
     concurrency?: number,
-    forcePolling?: boolean
+    forcePolling?: boolean,
+    typeCheck?: boolean
 
-type CompileSuccess = {
+type CompileSuccess = 
     status: "built" | "skip",
     file: string,
     outFile: string,
     signature: string
-}
-type CompileError = {
+
+type CompileError = 
     status: "error",
     file: string,
     error: any
-}
+
 export type CompileResult = CompileSuccess | CompileError
 
 defaultOpts: Options :=
@@ -67,8 +69,10 @@ defaultOpts: Options :=
     inlineMap: "full",
     mapFiles: false,
     ignoreFolders: [],
+    onlyFolders: [],
     concurrency: Math.min(2, (os.cpus()?.length || 2)),
-    forcePolling: false
+    forcePolling: false,
+    typeCheck: false
 
 // ──────────────────────────────────────────────────────────────
 // Build-state layer – Pure functions operating on BuildContext  
@@ -87,7 +91,9 @@ export type BuildContext =
     // previous content hashes for incremental builds
     prevHashes: Record<string, { sig: string, outFile: string }>,
     // new hashes produced this run
-    newHashes: Record<string, { sig: string, outFile: string }>
+    newHashes: Record<string, { sig: string, outFile: string }>,
+    // cached Civet parseOptions loaded once per build run
+    parseOpts?: any
 
 // ---------------- helper utils (pure) ----------------
 
@@ -174,6 +180,24 @@ resolveOutputType := (ctx: { cwd: string, opts: Options }, file: string): boolea
     if tsMatch  return false
     return ctx.opts.tsx
 
+// NEW: Helper to determine which paths/globs to use for build & watch
+getSourcePaths := (opts: Options, cwd: string) =>
+    hasOnly := opts.onlyFolders and opts.onlyFolders.length > 0
+    
+    // If --only-folders is used, target those folders specifically.
+    if hasOnly
+        // Globs for `fast-glob` need the `**/*.civet` suffix.
+        globPatterns := opts.onlyFolders!.map((p) => path.join(p, '**', '*.civet'))
+        // Paths for `chokidar` should just be the directories themselves.
+        watchPaths := opts.onlyFolders!
+        return { globPatterns, watchPaths }
+    
+    // Otherwise, default to searching the entire project directory.
+    return { 
+        globPatterns: ['**/*.civet'], 
+        watchPaths: [cwd] 
+    }
+
 collectDirs := (val: string, prev: string[]) =>
     // Accept comma-separated lists or repeatable flags.
     prev.concat(
@@ -181,6 +205,9 @@ collectDirs := (val: string, prev: string[]) =>
             .map((s: string) => s.trim())
             .filter((s): s is string => !!s)
     )
+
+// Convert OS-specific paths (with backslashes) to POSIX style for glob libs/micromatch
+toPosix := (p: string): string => p.split(path.sep).join("/")
 
 // ---------------- manifest helpers (pure fs) ----------------
 manifestDir := (cwd: string) => join(cwd, ".civetman")
@@ -248,6 +275,22 @@ export writeOutputAndGetResult := async (
 
     await safeWrite(expectedOut, codeOut)
     ctx.outFiles.add(expectedOut)
+
+    // --- Cleanup: remove bygone sibling (.ts vs .tsx) to prevent stale duplicates ---
+    siblingOut := file.replace(
+        '.civet',
+        isTsx ? '.ts' : '.tsx'
+    )
+    try
+        if siblingOut != expectedOut && await fs.pathExists(siblingOut)
+            await fs.unlink(siblingOut)
+            ctx.outFiles.delete(siblingOut)
+        if await fs.pathExists(siblingOut + '.map')
+            await fs.unlink(siblingOut + '.map')
+            ctx.outFiles.delete(siblingOut + '.map')
+    catch _
+        // best-effort, ignore errors
+
     logDebug("built", file)
     return { status: "built", file, outFile: expectedOut, signature }
 }
@@ -265,9 +308,8 @@ export compileSource := async (ctx: BuildContext, file: string): Promise<Compile
     content := await fs.readFile(file, "utf8")
 
     //  -- look for a civet config file (🐈.json, civetconfig.json, etc.) to include in signature and pass to compiler
-    configPath := await findCivetConfig(ctx.cwd)           // might be null if none exists
-    civetConfig := (configPath? ? await loadCivetConfig(configPath) : {}) || {}
-    parseOpts := civetConfig?.parseOptions
+    // Use cached parse options if available to avoid repeated disk lookups
+    parseOpts := ctx.parseOpts ?? null
 
     signature := makeSignature(content, { 
         tsx: isTsx, 
@@ -332,12 +374,17 @@ addVscodeExcludes := async (ctx: BuildContext) =>
     await fs.ensureDir(vscodeDir)
     await fs.ensureFile(settingsFile)
 
-    content := await fs.readFile(settingsFile, "utf8")
-    errors: ParseError[] := []
-    tree := jsoncParseTree(content, errors, { allowTrailingComma: true })
+    content .= await fs.readFile(settingsFile, "utf8")
+    errors: ParseError[] .= []
+    tree .= jsoncParseTree(content, errors, { allowTrailingComma: true })
     if !tree
-        // cannot parse settings, bail early
-        return
+        // File is empty or contains invalid JSONC – start from a clean state
+        content = "{}\n"
+        errors = []
+        tree = jsoncParseTree(content, errors, { allowTrailingComma: true })
+        if !tree
+            // Still cannot parse (extremely unlikely) – bail early to avoid corruption
+            return
 
     node := jsoncFindNodeAtLocation(tree, [configKey])
     existing := (node ? jsoncGetNodeValue(node) : {}) as Record<string, boolean>
@@ -433,13 +480,19 @@ runBuild := async (cwd: string, opts: Options) =>
     await cleanupTmpFiles(cwd)
 
     // Step 1: collect source files
+    { globPatterns } := getSourcePaths(opts, cwd)
     baseIgnores := ["node_modules/**", "dist/**", "**/*.civetmantmp", "**/.*"]
     userIgnores := (opts.ignoreFolders ?? []).map((d) => path.join(d, "**"))
-    ignorePatterns := [...baseIgnores, ...userIgnores]
+    ignorePatterns := [...baseIgnores, ...userIgnores].map(toPosix)
 
-    sources := await glob("**/*.civet", ignore: ignorePatterns, cwd: cwd, caseSensitiveMatch: false)
+    sources := await glob(globPatterns, ignore: ignorePatterns, cwd: cwd, caseSensitiveMatch: false)
 
     // Step 2: load previous state and create context
+    // Load Civet config once and cache its parseOptions for the whole build run
+    configPath := await findCivetConfig(cwd)
+    civetConfig := (configPath? ? await loadCivetConfig(configPath) : {}) || {}
+    cachedParseOpts := civetConfig?.parseOptions
+
     { prevGenerated, prevHashes } := await loadPrevState(cwd)
     ctx: BuildContext :=
         opts: opts,
@@ -448,7 +501,8 @@ runBuild := async (cwd: string, opts: Options) =>
         outFiles: new Set<string>(),
         prevGenerated: prevGenerated,
         prevHashes: prevHashes,
-        newHashes: {}
+        newHashes: {},
+        parseOpts: cachedParseOpts
 
     // Create the build engine which orchestrates compilation.
     engine := new BuildEngine(ctx)
@@ -506,6 +560,16 @@ runBuild := async (cwd: string, opts: Options) =>
 // UI layer – Responsible for colours, spinners, CLI exit codes   
 // ──────────────────────────────────────────────────────────────
 
+// ---------------- type-check helper ----------------
+runTscTypeCheck := (cwd: string): Promise<void> =>
+    new Promise (resolve, reject) =>
+        child := require('node:child_process').spawn('npx', ['--yes', 'tsc', '-p', cwd, '--noEmit', '--pretty', 'false'], {
+            cwd: cwd,
+            stdio: 'inherit'
+        })
+        child.on 'close', (code: number) =>
+            if code == 0 then resolve() else reject(new Error("tsc exit code " + code))
+
 // CLI command – build
 registerBuildCommand := =>
     program.command "build"
@@ -518,6 +582,16 @@ registerBuildCommand := =>
                 buildResult := await runBuild(cwd, opts)
                 engine = buildResult.engine
                 console.log c.green("\nCivetman finished building!")
+
+                // Optional post-build type-check
+                if opts.typeCheck
+                    console.log c.blue("Running TypeScript type-check…")
+                    try
+                        await runTscTypeCheck(cwd)
+                        console.log c.green("Type-check passed!\n")
+                    catch err
+                        console.error c.red("Type-check failed. See errors above.")
+                        void (process.exitCode = 1)
             catch e
                 // runBuild will have already logged details
                 void (process.exitCode = 1)
@@ -533,14 +607,15 @@ createWatcher := (cwd: string, opts: Options) ->
     // Build ignore patterns (same logic as build step)
     baseIgnores := ["node_modules/**", "dist/**", "**/*.civetmantmp", "**/.*"]
     userIgnores := (opts.ignoreFolders || []).map((d: string) => path.join(d, "**"))
-    ignorePatterns := [...baseIgnores, ...userIgnores]
+    ignorePatterns := [...baseIgnores, ...userIgnores].map(toPosix)
 
+    { watchPaths } := getSourcePaths(opts, cwd)
     // Case-insensitive matcher using micromatch
     ignoreFn := (abs: string) =>
         rel := path.relative(cwd, abs)
         micromatch.isMatch(rel, ignorePatterns, nocase: true)
 
-    chokidar.watch(cwd, {
+    chokidar.watch(watchPaths, {
         ignored: ignoreFn,
         persistent: true,
         ignoreInitial: true,
@@ -619,6 +694,9 @@ attachWatchHandlers := (watcher: any,
             else if result.status == 'error'
                 logDebug("[REBUILD_ONE] Error compiling", file, result.error)
                 console.error("Civetman error compiling", file, result.error)
+            
+            // Immediately refresh VS Code excludes to minimise flicker
+            await addVscodeExcludes(ctx)
             
             saveStateAndSync()
         })
@@ -714,6 +792,8 @@ export default () =>
         .option("--concurrency <number>", "Max parallel compilations", (val) => parseInt(val, 10))
         .option("--force-polling", "Force chokidar polling even outside CI")
         .option("--ignore-folders <dir>", "Folder(s) to ignore (repeatable or comma-separated)", collectDirs, [] as string[])
+        .option("--only-folders <dir>", "Folder(s) to exclusively build/watch (repeatable or comma-separated)", collectDirs, [] as string[])
+        .option("--type-check", "Run TypeScript type-check (tsc --noEmit) after build")
 
     registerBuildCommand()
     registerDevCommand()
